@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import sqlite3
+import ssl
 import threading
 import time
 import uuid
@@ -223,10 +224,11 @@ def build_mqtt_client() -> mqtt.Client:
         client_id=MQTT_CLIENT_ID,
     )
     client.username_pw_set(MQTT_USER, MQTT_PASS)
-    try:
-        client.tls_set()  # TLS con el almacén de CAs del sistema (Let's Encrypt)
-    except Exception as e:
-        print(f"[mqtt] tls_set error: {e}")
+    # ssl.create_default_context() carga el almacén de CAs del sistema de forma
+    # explícita. Más fiable que tls_set() sin argumentos en Raspberry Pi OS,
+    # que en algunas versiones de paho no encuentra la CA bundle y causa
+    # "Connection reset by peer" durante el handshake TLS.
+    client.tls_set_context(ssl.create_default_context())
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_message = on_message
