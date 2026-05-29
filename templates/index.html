@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Matera inteligente</title>
+  <style>
+    :root {
+      --bg: #0f1419; --card: #1b232d; --fg: #e6edf3; --muted: #8b98a5;
+      --accent: #2ad1a9; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, sans-serif; background: var(--bg);
+      color: var(--fg); padding: 20px; max-width: 760px; margin: 0 auto;
+    }
+    header { display: flex; align-items: center; justify-content: space-between; }
+    h1 { font-size: 1.4rem; margin: 0; }
+    .status { font-size: .85rem; color: var(--muted); }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+           background: var(--bad); margin-right: 6px; vertical-align: middle; }
+    .dot.on { background: var(--ok); }
+    .grid {
+      display: grid; gap: 14px; margin: 20px 0;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    }
+    .card { background: var(--card); border-radius: 14px; padding: 16px; }
+    .label { color: var(--muted); font-size: .8rem; text-transform: uppercase;
+             letter-spacing: .04em; }
+    .value { font-size: 2rem; font-weight: 600; margin-top: 6px; }
+    .unit { font-size: 1rem; color: var(--muted); margin-left: 4px; }
+    .panel { background: var(--card); border-radius: 14px; padding: 18px;
+             display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    button {
+      border: 0; border-radius: 10px; padding: 12px 18px; font-size: 1rem;
+      font-weight: 600; cursor: pointer; color: #06120e; background: var(--accent);
+    }
+    button.stop { background: var(--bad); color: #fff; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .pill { padding: 4px 10px; border-radius: 999px; font-size: .8rem;
+            background: #243; color: var(--accent); }
+    .pill.irr { background: #1b2f4a; color: #6cb6ff; }
+    .meta { color: var(--muted); font-size: .8rem; margin-top: 16px; }
+    body.stale { opacity: .55; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🪴 Matera inteligente</h1>
+    <div class="status"><span id="dot" class="dot"></span><span id="conn">sin datos</span></div>
+  </header>
+
+  <div class="grid">
+    <div class="card"><div class="label">Humedad suelo</div>
+      <div class="value"><span id="soil">--</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">Temperatura</div>
+      <div class="value"><span id="temp">--</span><span class="unit">°C</span></div></div>
+    <div class="card"><div class="label">Humedad ambiente</div>
+      <div class="value"><span id="hum">--</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">Luz</div>
+      <div class="value"><span id="lux">--</span><span class="unit">lx</span></div></div>
+    <div class="card"><div class="label">Calidad de aire</div>
+      <div class="value"><span id="ppm">--</span><span class="unit">ppm</span></div></div>
+    <div class="card"><div class="label">Riego</div>
+      <div class="value" style="font-size:1.3rem;margin-top:14px">
+        <span id="irrpill" class="pill">inactivo</span></div></div>
+  </div>
+
+  <h2 style="font-size:1.1rem">Controles remotos</h2>
+  <div class="panel">
+    <button id="btnPumpOn">💧 Regar ahora</button>
+    <button id="btnPumpOff" class="stop">Detener bomba</button>
+    <button id="btnPlay">🎵 Melodía de riego</button>
+  </div>
+
+  <div class="meta">
+    Última actualización: <span id="ts">--</span>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const fmt = (v, d) => (v === undefined || v === null || isNaN(v)) ? "--" : Number(v).toFixed(d);
+
+    function render(d) {
+      const connected = d && d.connected;
+      $("dot").className = "dot" + (connected ? " on" : "");
+      $("conn").textContent = connected ? "en línea" : "sin datos";
+      document.body.classList.toggle("stale", !connected);
+      if (!connected) return;
+
+      $("soil").textContent = fmt(d.soil, 1);
+      $("temp").textContent = fmt(d.temp, 1);
+      $("hum").textContent  = fmt(d.hum, 1);
+      $("lux").textContent  = fmt(d.lux, 0);
+      $("ppm").textContent  = fmt(d.ppm, 0);
+
+      const irr = !!d.irrigating;
+      const pill = $("irrpill");
+      pill.textContent = irr ? "regando" : "inactivo";
+      pill.className = "pill" + (irr ? " irr" : "");
+
+      $("ts").textContent = new Date().toLocaleTimeString();
+    }
+
+    // Stream en vivo por Server-Sent Events.
+    const es = new EventSource("/api/stream");
+    es.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (_) {} };
+    es.onerror = () => { document.body.classList.add("stale"); };
+
+    // Botones de control -> POST a la API, que publica el comando MQTT.
+    async function post(url, body) {
+      try {
+        await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: body ? JSON.stringify(body) : null,
+        });
+      } catch (_) { /* la confirmación real llega por el stream de sensores */ }
+    }
+    $("btnPumpOn").onclick  = () => post("/api/pump", { on: true });
+    $("btnPumpOff").onclick = () => post("/api/pump", { on: false });
+    $("btnPlay").onclick    = () => post("/api/play");
+  </script>
+</body>
+</html>

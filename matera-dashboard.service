@@ -1,0 +1,26 @@
+# =============================================================================
+# Servicio systemd para arrancar el dashboard al encender la Raspberry Pi.
+#
+# Instalación (ajustá la ruta WorkingDirectory/ExecStart y el usuario si hace
+# falta; este ejemplo asume el usuario "pi" y el proyecto en /home/pi):
+#
+#   sudo cp matera-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now matera-dashboard
+#   systemctl status matera-dashboard      # ver estado
+#   journalctl -u matera-dashboard -f      # ver logs en vivo
+# =============================================================================
+[Unit]
+Description=Matera inteligente - dashboard IoT (Flask + MQTT)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/intelligent_pot/raspi
+ExecStart=/home/pi/intelligent_pot/raspi/venv/bin/python app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
