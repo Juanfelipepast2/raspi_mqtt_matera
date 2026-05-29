@@ -20,11 +20,11 @@ import json
 import os
 import queue
 import sqlite3
-import ssl
 import threading
 import time
 import uuid
 
+import certifi
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request
 import paho.mqtt.client as mqtt
@@ -224,11 +224,10 @@ def build_mqtt_client() -> mqtt.Client:
         client_id=MQTT_CLIENT_ID,
     )
     client.username_pw_set(MQTT_USER, MQTT_PASS)
-    # ssl.create_default_context() carga el almacén de CAs del sistema de forma
-    # explícita. Más fiable que tls_set() sin argumentos en Raspberry Pi OS,
-    # que en algunas versiones de paho no encuentra la CA bundle y causa
-    # "Connection reset by peer" durante el handshake TLS.
-    client.tls_set_context(ssl.create_default_context())
+    # certifi provee su propio bundle de CAs actualizado (incluye ISRG Root X1
+    # de Let's Encrypt que usa HiveMQ Cloud). Más fiable que el almacén del
+    # sistema en Raspberry Pi OS, que puede no tenerlo si no está actualizado.
+    client.tls_set(ca_certs=certifi.where())
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_message = on_message
