@@ -17,8 +17,8 @@ Wants=network-online.target
 
 [Service]
 User=pi
-WorkingDirectory=/home/pi/intelligent_pot/raspi
-ExecStart=/home/pi/intelligent_pot/raspi/venv/bin/python app.py
+WorkingDirectory=/home/pi/raspi_mqtt_matera
+ExecStart=/home/pi/raspi_mqtt_matera/venv/bin/python app.py
 Restart=on-failure
 RestartSec=5
 

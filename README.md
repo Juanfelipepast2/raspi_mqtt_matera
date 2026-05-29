@@ -3,18 +3,39 @@
 Este es el lado **Raspberry Pi** del proyecto. Se conecta al broker **HiveMQ
 Cloud** (TLS) y cumple dos funciones:
 
-1. **Se suscribe** al topic de sensores (`matera/sensors`) que publica el ESP32
-   y muestra los datos en vivo en un dashboard web (humedad de suelo,
-   temperatura, humedad ambiente, luz y calidad de aire).
-2. **Publica comandos** en `matera/cmd/pump` y `matera/cmd/play` para activar la
-   bomba de agua o la melodía de riego de forma remota. El ESP32 está suscrito a
-   esos topics y reacciona, así que podés regar la mata **desde cualquier parte
-   del mundo**.
+1. **Se suscribe** a los topics que publica el ESP32:
+   - `matera/sensors` — lecturas en vivo (humedad de suelo, temperatura,
+     humedad ambiente, luz y calidad de aire) que se muestran en tarjetas y se
+     **historizan en SQLite** para dibujar gráficas con filtro temporal.
+   - `matera/state` — catálogo/estado **retenido** (lista de canciones de la SD,
+     canción de riego, volumen, umbral de riego, brillo/patrón/color de los
+     NeoPixel y la lista de patrones disponibles). Pobla los controles del
+     dashboard y refleja cualquier cambio al instante.
+2. **Publica comandos** en `matera/cmd/#` para controlar el ESP32 de forma
+   remota: regar ahora / detener bomba, cambiar el umbral de riego, reproducir
+   una canción por índice, parar el audio, ajustar el volumen, fijar la canción
+   de riego y controlar los NeoPixel (brillo, patrón y color). El ESP32 está
+   suscrito al comodín `matera/cmd/#` y reacciona, así que podés gobernar la mata
+   **desde cualquier parte del mundo**.
 
 ```
-   ESP32  ──publica matera/sensors──▶  HiveMQ Cloud  ──▶  Raspberry Pi (dashboard)
-   ESP32  ◀──suscrito a matera/cmd/*──  HiveMQ Cloud  ◀──  Raspberry Pi (botones)
+   ESP32  ──publica matera/sensors + matera/state──▶  HiveMQ  ──▶  Raspberry Pi (dashboard + gráficas)
+   ESP32  ◀────────── suscrito a matera/cmd/# ───────  HiveMQ  ◀──  Raspberry Pi (controles)
 ```
+
+## Funciones del dashboard
+
+- **Valores en tiempo real** de los 5 sensores + estado de riego (igual que el
+  display del ESP).
+- **Gráficas** por sensor (Chart.js, servido localmente desde `static/`) con
+  filtro temporal: últimos 5 min, 30 min, 1 h, 6 h, 1 día o todo el histórico.
+- **Riego** con las mismas políticas que el ESP: botón *Regar ahora* (pulso de
+  bomba de 3–4 s) que se **bloquea hasta que termina el ciclo**, botón de parada
+  y campo para cambiar el **umbral** de riego automático.
+- **Canciones**: lista las pistas de la microSD del ESP; reproducir por índice,
+  parar, fijar la canción de riego y control de **volumen**.
+- **NeoPixel**: brillo, selección de **patrón** (rainbow, solid, off, breathe,
+  comet) y selector de **color** para los patrones de color sólido.
 
 ## Arquitectura del servidor
 
@@ -33,7 +54,7 @@ Cloud** (TLS) y cumple dos funciones:
 ## Instalación
 
 ```bash
-cd intelligent_pot/raspi
+cd raspi_mqtt_matera
 
 # 1. Entorno virtual + dependencias
 python3 -m venv venv
@@ -67,13 +88,23 @@ journalctl -u matera-dashboard -f     # logs en vivo
 
 ## API REST
 
-| Método | Ruta          | Descripción                                              |
-|--------|---------------|----------------------------------------------------------|
-| GET    | `/`           | Dashboard web                                            |
-| GET    | `/api/data`   | Última lectura conocida (JSON)                           |
-| GET    | `/api/stream` | Stream SSE con cada nueva lectura                        |
-| POST   | `/api/pump`   | Body `{"on": true}` → regar, `{"on": false}` → detener   |
-| POST   | `/api/play`   | Dispara la melodía de riego                              |
+| Método | Ruta            | Descripción                                                        |
+|--------|-----------------|--------------------------------------------------------------------|
+| GET    | `/`             | Dashboard web                                                      |
+| GET    | `/api/data`     | Última lectura de sensores (JSON)                                  |
+| GET    | `/api/state`    | Último catálogo/estado del ESP (canciones, volumen, umbral, neo)   |
+| GET    | `/api/history`  | Histórico para gráficas. `?range=5m\|30m\|1h\|6h\|24h\|all`         |
+| GET    | `/api/stream`   | Stream SSE: eventos `sensors` y `state`                            |
+| POST   | `/api/pump`     | `{"on": true}` → regar ahora, `{"on": false}` → detener            |
+| POST   | `/api/play`     | `{"index": N}` → reproducir la canción N de la SD                  |
+| POST   | `/api/stop`     | Detener el audio                                                   |
+| POST   | `/api/volume`   | `{"level": 0..volumeMax}` → fijar el volumen                       |
+| POST   | `/api/wsong`    | `{"index": N}` → fijar la canción de riego                         |
+| POST   | `/api/threshold`| `{"value": 35}` → cambiar el umbral de riego (%)                   |
+| POST   | `/api/neo`      | `{"brightness": 0..255, "pattern": "solid", "color": "#33aa55"}`   |
+
+Cada endpoint POST publica en el topic `matera/cmd/...` correspondiente; el
+ESP32 (suscrito a `matera/cmd/#`) ejecuta el comando.
 
 ## Formato de los datos
 
@@ -83,10 +114,17 @@ El ESP32 publica en `matera/sensors` un JSON como:
 {"soil":42.5,"temp":24.3,"hum":58.1,"lux":820,"ppm":450,"irrigating":false,"ts":123456}
 ```
 
-- `soil` — humedad del suelo (%)
-- `temp` — temperatura (°C, DHT11)
-- `hum`  — humedad ambiente (%, DHT11)
-- `lux`  — luz (BH1750)
-- `ppm`  — calidad de aire / CO₂-eq (MQ-135)
-- `irrigating` — `true` si la bomba está regando en este momento
-- `ts`   — millis() del ESP32 al momento de la lectura
+- `soil` — humedad del suelo (%) · `temp` — temperatura (°C) · `hum` — humedad
+  ambiente (%) · `lux` — luz (BH1750) · `ppm` — calidad de aire (MQ-135) ·
+  `irrigating` — `true` si está regando · `ts` — millis() del ESP32.
+
+Y en `matera/state` (RETENIDO) un JSON como:
+
+```json
+{"songs":["lluvia.mp3","jardin.mp3"],"wateringSong":1,"volume":3,"volumeMax":4,
+ "threshold":35.0,"neoBright":40,"neoBright2":40,"neoPattern":"solid",
+ "neoColor":"FF7800","patterns":["rainbow","solid","off","breathe","comet"]}
+```
+
+> El histórico se guarda en `history.db` (SQLite, ignorado por git). La opción
+> *“Todo el tiempo”* abarca desde la primera lectura almacenada en esa base.

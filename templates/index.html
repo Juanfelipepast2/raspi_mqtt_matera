@@ -4,24 +4,28 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Matera inteligente</title>
+  <script src="{{ url_for('static', filename='chart.min.js') }}"></script>
   <style>
     :root {
       --bg: #0f1419; --card: #1b232d; --fg: #e6edf3; --muted: #8b98a5;
       --accent: #2ad1a9; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+      --line: #2b3640;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; font-family: system-ui, sans-serif; background: var(--bg);
-      color: var(--fg); padding: 20px; max-width: 760px; margin: 0 auto;
+      color: var(--fg); padding: 20px; max-width: 1040px; margin: 0 auto;
     }
-    header { display: flex; align-items: center; justify-content: space-between; }
+    header { display: flex; align-items: center; justify-content: space-between;
+             flex-wrap: wrap; gap: 8px; }
     h1 { font-size: 1.4rem; margin: 0; }
+    h2 { font-size: 1.1rem; margin: 28px 0 10px; color: var(--fg); }
     .status { font-size: .85rem; color: var(--muted); }
     .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
            background: var(--bad); margin-right: 6px; vertical-align: middle; }
     .dot.on { background: var(--ok); }
     .grid {
-      display: grid; gap: 14px; margin: 20px 0;
+      display: grid; gap: 14px; margin: 16px 0;
       grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     }
     .card { background: var(--card); border-radius: 14px; padding: 16px; }
@@ -30,18 +34,37 @@
     .value { font-size: 2rem; font-weight: 600; margin-top: 6px; }
     .unit { font-size: 1rem; color: var(--muted); margin-left: 4px; }
     .panel { background: var(--card); border-radius: 14px; padding: 18px;
-             display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+             margin-bottom: 14px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           margin: 10px 0; }
+    .row > label.cap { min-width: 150px; color: var(--muted); font-size: .9rem; }
     button {
-      border: 0; border-radius: 10px; padding: 12px 18px; font-size: 1rem;
+      border: 0; border-radius: 10px; padding: 11px 16px; font-size: .95rem;
       font-weight: 600; cursor: pointer; color: #06120e; background: var(--accent);
     }
     button.stop { background: var(--bad); color: #fff; }
-    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.alt  { background: #30363d; color: var(--fg); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    input[type=number] { width: 90px; }
+    input[type=number], select {
+      background: #0d1117; color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 9px; font-size: .95rem;
+    }
+    input[type=range] { flex: 1; min-width: 160px; accent-color: var(--accent); }
+    input[type=color] { width: 48px; height: 36px; border: 1px solid var(--line);
+                        border-radius: 8px; background: #0d1117; cursor: pointer; }
     .pill { padding: 4px 10px; border-radius: 999px; font-size: .8rem;
             background: #243; color: var(--accent); }
     .pill.irr { background: #1b2f4a; color: #6cb6ff; }
-    .meta { color: var(--muted); font-size: .8rem; margin-top: 16px; }
-    body.stale { opacity: .55; }
+    .hint { color: var(--muted); font-size: .8rem; }
+    .charts { display: grid; gap: 14px;
+              grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .chart-card { background: var(--card); border-radius: 14px; padding: 14px; }
+    .chart-card h3 { margin: 0 0 8px; font-size: .95rem; font-weight: 600; }
+    .chart-card .now { float: right; color: var(--muted); font-weight: 400; }
+    .chart-box { position: relative; height: 200px; }
+    .meta { color: var(--muted); font-size: .8rem; margin-top: 18px; }
+    body.stale .grid { opacity: .55; }
   </style>
 </head>
 <body>
@@ -50,6 +73,7 @@
     <div class="status"><span id="dot" class="dot"></span><span id="conn">sin datos</span></div>
   </header>
 
+  <!-- ===== Valores en tiempo real ===== -->
   <div class="grid">
     <div class="card"><div class="label">Humedad suelo</div>
       <div class="value"><span id="soil">--</span><span class="unit">%</span></div></div>
@@ -66,60 +90,284 @@
         <span id="irrpill" class="pill">inactivo</span></div></div>
   </div>
 
-  <h2 style="font-size:1.1rem">Controles remotos</h2>
+  <!-- ===== Gráficas ===== -->
+  <h2>Gráficas
+    <select id="range" style="float:right;font-weight:400">
+      <option value="5m">Últimos 5 min</option>
+      <option value="30m">Últimos 30 min</option>
+      <option value="1h" selected>Última hora</option>
+      <option value="6h">Últimas 6 h</option>
+      <option value="24h">Último día</option>
+      <option value="all">Todo el tiempo</option>
+    </select>
+  </h2>
+  <div class="charts" id="charts"></div>
+
+  <!-- ===== Riego ===== -->
+  <h2>Riego</h2>
   <div class="panel">
-    <button id="btnPumpOn">💧 Regar ahora</button>
-    <button id="btnPumpOff" class="stop">Detener bomba</button>
-    <button id="btnPlay">🎵 Melodía de riego</button>
+    <div class="row">
+      <label class="cap">Umbral de humedad</label>
+      <input type="number" id="thr" min="0" max="100" step="1">
+      <span class="unit">%</span>
+      <button onclick="setThreshold()">Aplicar</button>
+      <span class="hint">Por debajo de este valor se riega automáticamente.</span>
+    </div>
+    <div class="row">
+      <label class="cap">Riego manual</label>
+      <button id="btnWater" onclick="waterNow()">💧 Regar ahora</button>
+      <button class="stop" onclick="pump(false)">Detener</button>
+      <span class="hint" id="irrhint">Pulso de bomba de 3–4 s (mismas políticas que el ESP).</span>
+    </div>
+  </div>
+
+  <!-- ===== Audio / canciones ===== -->
+  <h2>Canciones (microSD del ESP)</h2>
+  <div class="panel">
+    <div class="row">
+      <label class="cap">Canción</label>
+      <select id="songsel" style="min-width:220px"></select>
+      <button onclick="playSong()">▶ Reproducir</button>
+      <button class="stop" onclick="stopSong()">⏹ Parar</button>
+      <button class="alt" onclick="setWatering()">Usar como canción de riego</button>
+    </div>
+    <div class="row">
+      <label class="cap">Volumen</label>
+      <input type="range" id="vol" min="0" max="4" step="1"
+             oninput="volval.textContent=this.value" onchange="setVolume(this.value)">
+      <span id="volval">--</span>
+    </div>
+    <div class="row hint" id="wsonglbl">Canción de riego: (ninguna)</div>
+  </div>
+
+  <!-- ===== NeoPixel ===== -->
+  <h2>Anillos NeoPixel</h2>
+  <div class="panel">
+    <div class="row">
+      <label class="cap">Brillo</label>
+      <input type="range" id="neoBright" min="0" max="255" step="1"
+             oninput="neoBrightVal.textContent=this.value" onchange="setNeoBright(this.value)">
+      <span id="neoBrightVal">--</span>
+    </div>
+    <div class="row">
+      <label class="cap">Patrón</label>
+      <select id="neoPattern" onchange="setNeoPattern(this.value)"></select>
+      <span id="colorWrap" style="display:none">
+        <input type="color" id="neoColor" onchange="setNeoColor(this.value)">
+        <span class="hint">Color (para patrones de color sólido)</span>
+      </span>
+    </div>
   </div>
 
   <div class="meta">
     Última actualización: <span id="ts">--</span>
+    &nbsp;|&nbsp; <span id="msg"></span>
   </div>
 
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const fmt = (v, d) => (v === undefined || v === null || isNaN(v)) ? "--" : Number(v).toFixed(d);
+<script>
+  const $ = (id) => document.getElementById(id);
+  const fmt = (v, d) => (v === undefined || v === null || isNaN(v)) ? "--" : Number(v).toFixed(d);
 
-    function render(d) {
-      const connected = d && d.connected;
-      $("dot").className = "dot" + (connected ? " on" : "");
-      $("conn").textContent = connected ? "en línea" : "sin datos";
-      document.body.classList.toggle("stale", !connected);
-      if (!connected) return;
+  function flash(m) { const s = $("msg"); s.textContent = m; setTimeout(() => { if (s.textContent === m) s.textContent = ""; }, 2500); }
 
-      $("soil").textContent = fmt(d.soil, 1);
-      $("temp").textContent = fmt(d.temp, 1);
-      $("hum").textContent  = fmt(d.hum, 1);
-      $("lux").textContent  = fmt(d.lux, 0);
-      $("ppm").textContent  = fmt(d.ppm, 0);
+  // ---------- Comandos (POST -> publica MQTT) ----------
+  async function post(url, body) {
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : null,
+      });
+    } catch (e) { flash("Error de red"); }
+  }
+  function pump(on)        { post("/api/pump", { on }); flash(on ? "Riego iniciado" : "Bomba detenida"); }
+  function waterNow()      { $("btnWater").disabled = true; pump(true); }
+  function setThreshold()  { const v = $("thr").value; post("/api/threshold", { value: Number(v) }); flash("Umbral = " + v + "%"); }
+  function playSong()      { const i = $("songsel").value; if (i === "") return flash("No hay canciones"); post("/api/play", { index: Number(i) }); flash("Reproduciendo"); }
+  function stopSong()      { post("/api/stop"); flash("Audio detenido"); }
+  function setWatering()   { const s = $("songsel"); if (s.value === "") return flash("No hay canciones"); post("/api/wsong", { index: Number(s.value) }); flash("Canción de riego fijada"); }
+  function setVolume(v)    { post("/api/volume", { level: Number(v) }); }
+  function setNeoBright(v) { post("/api/neo", { brightness: Number(v) }); }
+  function setNeoPattern(p){ post("/api/neo", { pattern: p }); toggleColor(p); }
+  function setNeoColor(c)  { post("/api/neo", { color: c }); }
 
-      const irr = !!d.irrigating;
-      const pill = $("irrpill");
-      pill.textContent = irr ? "regando" : "inactivo";
-      pill.className = "pill" + (irr ? " irr" : "");
+  const COLOR_PATTERNS = ["solid", "breathe", "comet"];
+  function toggleColor(p) { $("colorWrap").style.display = COLOR_PATTERNS.includes(p) ? "" : "none"; }
 
-      $("ts").textContent = new Date().toLocaleTimeString();
+  // No pisar un control mientras el usuario lo está manipulando.
+  const busy = (el) => document.activeElement === el;
+
+  // ---------- Gráficas ----------
+  const METRICS = [
+    { key: "soil", title: "Humedad del suelo", unit: "%",   color: "#3fb950", fill: true,  dec: 1 },
+    { key: "temp", title: "Temperatura",       unit: "°C",  color: "#d29922", fill: false, dec: 1 },
+    { key: "hum",  title: "Humedad ambiente",  unit: "%",   color: "#6cb6ff", fill: false, dec: 1 },
+    { key: "lux",  title: "Luz",               unit: "lx",  color: "#e3b341", fill: true,  dec: 0 },
+    { key: "ppm",  title: "Calidad de aire",   unit: "ppm", color: "#f85149", fill: false, dec: 0 },
+  ];
+  const RANGE_MS = { "5m": 3e5, "30m": 18e5, "1h": 36e5, "6h": 216e5, "24h": 864e5, "all": Infinity };
+  const charts = {};      // key -> Chart
+  const series = {};      // key -> [{t, v}]
+  const MAX_POINTS = 5000;
+
+  function buildCharts() {
+    const root = $("charts");
+    METRICS.forEach(m => {
+      const card = document.createElement("div");
+      card.className = "chart-card";
+      card.innerHTML =
+        `<h3>${m.title} <span class="now" id="now_${m.key}">--</span></h3>` +
+        `<div class="chart-box"><canvas id="ch_${m.key}"></canvas></div>`;
+      root.appendChild(card);
+      series[m.key] = [];
+      charts[m.key] = new Chart($("ch_" + m.key), {
+        type: "line",
+        data: { labels: [], datasets: [{
+          data: [], borderColor: m.color, backgroundColor: m.color + "33",
+          fill: m.fill, tension: 0.25, pointRadius: 0, borderWidth: 2,
+        }]},
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false },
+                     tooltip: { callbacks: { label: c => `${fmt(c.parsed.y, m.dec)} ${m.unit}` } } },
+          scales: {
+            x: { ticks: { color: "#8b98a5", maxTicksLimit: 6, maxRotation: 0 },
+                 grid: { color: "#2b3640" } },
+            y: { ticks: { color: "#8b98a5" }, grid: { color: "#2b3640" } },
+          },
+        },
+      });
+    });
+  }
+
+  function currentRange() { return $("range").value; }
+
+  function renderChart(m) {
+    const span = RANGE_MS[currentRange()];
+    const now = Date.now();
+    const pts = series[m.key].filter(p => now - p.t <= span);
+    const ch = charts[m.key];
+    ch.data.labels = pts.map(p => new Date(p.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    ch.data.datasets[0].data = pts.map(p => p.v);
+    ch.update("none");
+  }
+  function renderAllCharts() { METRICS.forEach(renderChart); }
+
+  // Carga el histórico del servidor para el rango actual y reconstruye las series.
+  async function loadHistory() {
+    try {
+      const r = await fetch("/api/history?range=" + currentRange(), { cache: "no-store" });
+      const d = await r.json();
+      METRICS.forEach(m => {
+        series[m.key] = (d.t || []).map((t, i) => ({ t, v: d[m.key][i] }))
+                                   .filter(p => p.v !== null && p.v !== undefined);
+      });
+      renderAllCharts();
+    } catch (e) { /* sin histórico aún */ }
+  }
+
+  // Agrega un punto en vivo a todas las series (recortando por tamaño).
+  function pushLive(d) {
+    const now = Date.now();
+    METRICS.forEach(m => {
+      const v = Number(d[m.key]);
+      if (isNaN(v)) return;
+      const arr = series[m.key];
+      arr.push({ t: now, v });
+      if (arr.length > MAX_POINTS) arr.shift();
+    });
+    renderAllCharts();
+  }
+
+  // ---------- Render de estado en vivo ----------
+  function renderSensors(d) {
+    const connected = d && d.connected;
+    $("dot").className = "dot" + (connected ? " on" : "");
+    $("conn").textContent = connected ? "en línea" : "sin datos";
+    document.body.classList.toggle("stale", !connected);
+    if (!connected) return;
+
+    $("soil").textContent = fmt(d.soil, 1);
+    $("temp").textContent = fmt(d.temp, 1);
+    $("hum").textContent  = fmt(d.hum, 1);
+    $("lux").textContent  = fmt(d.lux, 0);
+    $("ppm").textContent  = fmt(d.ppm, 0);
+    METRICS.forEach(m => { const n = $("now_" + m.key); if (n) n.textContent = fmt(d[m.key], m.dec) + " " + m.unit; });
+
+    const irr = !!d.irrigating;
+    const pill = $("irrpill");
+    pill.textContent = irr ? "regando" : "inactivo";
+    pill.className = "pill" + (irr ? " irr" : "");
+    // El botón "Regar ahora" se bloquea mientras dura el ciclo de riego.
+    $("btnWater").disabled = irr;
+    $("irrhint").textContent = irr
+      ? "Ciclo de riego en curso…"
+      : "Pulso de bomba de 3–4 s (mismas políticas que el ESP).";
+
+    $("ts").textContent = new Date().toLocaleTimeString();
+    pushLive(d);
+  }
+
+  function renderState(s) {
+    if (!s) return;
+    // Selector de canciones.
+    const sel = $("songsel");
+    const songs = s.songs || [];
+    if (sel.dataset.count != songs.length) {     // reconstruir sólo si cambió
+      sel.innerHTML = "";
+      songs.forEach((name, i) => {
+        const o = document.createElement("option");
+        o.value = i; o.textContent = name; sel.appendChild(o);
+      });
+      sel.dataset.count = songs.length;
+    }
+    if (typeof s.wateringSong === "number" && s.wateringSong >= 0 && songs[s.wateringSong]) {
+      $("wsonglbl").textContent = "Canción de riego: " + songs[s.wateringSong];
+    } else {
+      $("wsonglbl").textContent = "Canción de riego: (ninguna)";
     }
 
-    // Stream en vivo por Server-Sent Events.
-    const es = new EventSource("/api/stream");
-    es.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (_) {} };
-    es.onerror = () => { document.body.classList.add("stale"); };
-
-    // Botones de control -> POST a la API, que publica el comando MQTT.
-    async function post(url, body) {
-      try {
-        await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: body ? JSON.stringify(body) : null,
-        });
-      } catch (_) { /* la confirmación real llega por el stream de sensores */ }
+    // Volumen.
+    if (!busy($("vol"))) {
+      if (typeof s.volumeMax === "number") $("vol").max = s.volumeMax;
+      if (typeof s.volume === "number") { $("vol").value = s.volume; $("volval").textContent = s.volume; }
     }
-    $("btnPumpOn").onclick  = () => post("/api/pump", { on: true });
-    $("btnPumpOff").onclick = () => post("/api/pump", { on: false });
-    $("btnPlay").onclick    = () => post("/api/play");
-  </script>
+    // Umbral.
+    if (!busy($("thr")) && typeof s.threshold === "number") $("thr").value = Math.round(s.threshold);
+
+    // NeoPixel.
+    if (!busy($("neoBright")) && typeof s.neoBright === "number") {
+      $("neoBright").value = s.neoBright; $("neoBrightVal").textContent = s.neoBright;
+    }
+    const psel = $("neoPattern");
+    const patterns = s.patterns || [];
+    if (psel.dataset.count != patterns.length) {
+      psel.innerHTML = "";
+      patterns.forEach(p => { const o = document.createElement("option"); o.value = p; o.textContent = p; psel.appendChild(o); });
+      psel.dataset.count = patterns.length;
+    }
+    if (s.neoPattern && !busy(psel)) { psel.value = s.neoPattern; toggleColor(s.neoPattern); }
+    // <input type=color> exige hex en minúsculas con '#'.
+    if (s.neoColor && !busy($("neoColor")))
+      $("neoColor").value = ("#" + String(s.neoColor).replace(/^#/, "")).toLowerCase();
+  }
+
+  // ---------- Stream SSE ----------
+  const es = new EventSource("/api/stream");
+  es.onmessage = (e) => {
+    try {
+      const m = JSON.parse(e.data);
+      if (m.event === "sensors") renderSensors(m.data);
+      else if (m.event === "state") renderState(m.data);
+    } catch (_) {}
+  };
+  es.onerror = () => { document.body.classList.add("stale"); };
+
+  // ---------- Arranque ----------
+  $("range").addEventListener("change", loadHistory);
+  buildCharts();
+  loadHistory();
+  fetch("/api/state").then(r => r.json()).then(renderState).catch(() => {});
+</script>
 </body>
 </html>

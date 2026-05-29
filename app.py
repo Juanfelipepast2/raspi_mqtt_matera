@@ -3,24 +3,26 @@
 # app.py — Dashboard IoT de la "Matera inteligente" para Raspberry Pi.
 #
 # Rol de la Raspberry Pi en el sistema:
-#   * Se SUSCRIBE a TOPIC_SENSORS en HiveMQ Cloud y guarda la última lectura
-#     que publica el ESP32 (humedad de suelo, temperatura, humedad ambiente,
-#     luz y calidad de aire).
-#   * Sirve un dashboard web (Flask) que muestra esos datos en vivo (SSE) y
-#     ofrece botones de control.
-#   * PUBLICA en TOPIC_CMD_PUMP / TOPIC_CMD_PLAY para activar la bomba o la
-#     melodía de riego de forma remota; el ESP32 está suscrito y reacciona.
+#   * Se SUSCRIBE a TOPIC_SENSORS (lecturas en vivo) y a TOPIC_STATE (catálogo
+#     de canciones, volumen, umbral, patrón/color de los NeoPixel, etc.) que
+#     publica el ESP32 en HiveMQ Cloud.
+#   * Guarda un HISTÓRICO de las lecturas en SQLite para dibujar gráficas con
+#     filtro temporal (últimos 5 min, 1 h, 1 día, todo).
+#   * Sirve un dashboard web (Flask) que muestra los datos en vivo (SSE), las
+#     gráficas y todos los controles.
+#   * PUBLICA en TOPIC_CMD_* para mandar comandos al ESP32 (regar, reproducir
+#     una canción por índice, parar el audio, volumen, canción de riego, umbral
+#     de riego y control de los NeoPixel: brillo, patrón y color).
 #
-# Conexión a HiveMQ Cloud por TLS (puerto 8883) usando el almacén de CAs del
-# sistema operativo (HiveMQ Cloud usa certificados Let's Encrypt, ya confiables
-# en Raspberry Pi OS), con autenticación usuario/contraseña.
+# Conexión a HiveMQ Cloud por TLS (8883) con el almacén de CAs del sistema.
 # =============================================================================
 import json
 import os
 import queue
+import sqlite3
 import threading
-import uuid
 import time
+import uuid
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request
@@ -39,26 +41,123 @@ MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID")
 if not MQTT_CLIENT_ID or MQTT_CLIENT_ID == "matera-raspi":
     MQTT_CLIENT_ID = f"matera-raspi-{uuid.uuid4().hex[:8]}"
 
-# Keepalive configurable
 MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "120"))
 
+# Topics — deben coincidir EXACTAMENTE con los de src/core/config.h del ESP32.
 TOPIC_SENSORS = os.getenv("TOPIC_SENSORS", "matera/sensors")
+TOPIC_STATE = os.getenv("TOPIC_STATE", "matera/state")
 TOPIC_CMD_PUMP = os.getenv("TOPIC_CMD_PUMP", "matera/cmd/pump")
 TOPIC_CMD_PLAY = os.getenv("TOPIC_CMD_PLAY", "matera/cmd/play")
+TOPIC_CMD_STOP = os.getenv("TOPIC_CMD_STOP", "matera/cmd/stop")
+TOPIC_CMD_VOLUME = os.getenv("TOPIC_CMD_VOLUME", "matera/cmd/volume")
+TOPIC_CMD_WSONG = os.getenv("TOPIC_CMD_WSONG", "matera/cmd/wsong")
+TOPIC_CMD_THRESHOLD = os.getenv("TOPIC_CMD_THRESHOLD", "matera/cmd/threshold")
+TOPIC_CMD_NEO_BRIGHT = os.getenv("TOPIC_CMD_NEO_BRIGHT", "matera/cmd/neo/bright")
+TOPIC_CMD_NEO_PATTERN = os.getenv("TOPIC_CMD_NEO_PATTERN", "matera/cmd/neo/pattern")
+TOPIC_CMD_NEO_COLOR = os.getenv("TOPIC_CMD_NEO_COLOR", "matera/cmd/neo/color")
 
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
 
+# Ruta de la base de datos del histórico (junto al app.py por defecto).
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "history.db"))
+# Métricas que se guardan e historizan.
+METRICS = ("soil", "temp", "hum", "lux", "ppm")
+
 # ----- Estado compartido -----------------------------------------------------
-# latest: último snapshot de sensores recibido (dict) o None si aún no llegó.
+# latest: último snapshot de sensores recibido (dict) o {"connected": False}.
+# state:  último catálogo/estado recibido del ESP (canciones, volumen, etc.).
 # subscribers: colas de los clientes SSE conectados, para empujar updates.
 _state_lock = threading.Lock()
 latest = {"connected": False}
-subscribers: set[queue.Queue] = set()
+state: dict = {}
+subscribers: "set[queue.Queue]" = set()
+
+# ----- Histórico en SQLite ---------------------------------------------------
+_db_lock = threading.Lock()
+_db = sqlite3.connect(DB_PATH, check_same_thread=False)
+_db.execute(
+    "CREATE TABLE IF NOT EXISTS readings ("
+    " ts REAL PRIMARY KEY, soil REAL, temp REAL, hum REAL, lux REAL, ppm REAL)"
+)
+_db.execute("CREATE INDEX IF NOT EXISTS idx_ts ON readings(ts)")
+_db.commit()
+
+
+def _store_reading(ts: float, data: dict) -> None:
+    """Inserta una fila de lecturas en el histórico (ts en segundos epoch)."""
+    row = [ts] + [_num(data.get(m)) for m in METRICS]
+    with _db_lock:
+        try:
+            _db.execute(
+                "INSERT OR REPLACE INTO readings (ts, soil, temp, hum, lux, ppm)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                row,
+            )
+            _db.commit()
+        except sqlite3.Error as e:
+            print(f"[db] error guardando lectura: {e}")
+
+
+def _num(v):
+    """Convierte a float o None (para guardar NULL ante valores ausentes)."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Rangos de tiempo soportados por las gráficas (segundos hacia atrás; None=todo).
+RANGES = {
+    "5m": 5 * 60,
+    "30m": 30 * 60,
+    "1h": 60 * 60,
+    "6h": 6 * 60 * 60,
+    "24h": 24 * 60 * 60,
+    "all": None,
+}
+MAX_POINTS = 600  # tope de puntos devueltos por gráfica (se submuestrea si hace falta)
+
+
+def _query_history(range_key: str) -> dict:
+    """Devuelve el histórico en el rango pedido como columnas paralelas.
+
+    Estructura: {"t": [...ms...], "soil": [...], "temp": [...], ...}. Si hay más
+    de MAX_POINTS filas, submuestrea de forma uniforme para no saturar el
+    navegador.
+    """
+    span = RANGES.get(range_key, RANGES["1h"])
+    params: tuple = ()
+    where = ""
+    if span is not None:
+        where = "WHERE ts >= ?"
+        params = (time.time() - span,)
+    with _db_lock:
+        cur = _db.execute(f"SELECT COUNT(*) FROM readings {where}", params)
+        total = cur.fetchone()[0]
+        # Submuestreo: si hay demasiadas filas, tomamos 1 de cada `stride`.
+        stride = max(1, (total + MAX_POINTS - 1) // MAX_POINTS) if total else 1
+        cur = _db.execute(
+            f"SELECT ts, soil, temp, hum, lux, ppm FROM readings {where}"
+            " ORDER BY ts ASC",
+            params,
+        )
+        rows = cur.fetchall()
+
+    out: dict = {"t": []}
+    for m in METRICS:
+        out[m] = []
+    for i, r in enumerate(rows):
+        if i % stride != 0 and i != len(rows) - 1:
+            continue
+        out["t"].append(int(r[0] * 1000))  # epoch ms para el eje de tiempo
+        for j, m in enumerate(METRICS):
+            out[m].append(r[j + 1])
+    return out
 
 
 def _broadcast(payload: dict) -> None:
-    """Empuja un payload (dict) a todos los clientes SSE conectados."""
+    """Empuja un payload (dict con 'event' y 'data') a los clientes SSE."""
     msg = json.dumps(payload)
     with _state_lock:
         dead = []
@@ -76,7 +175,8 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     if reason_code == 0:
         print(f"[mqtt] conectado a {MQTT_HOST}:{MQTT_PORT}")
         client.subscribe(TOPIC_SENSORS)
-        print(f"[mqtt] suscrito a {TOPIC_SENSORS}")
+        client.subscribe(TOPIC_STATE)
+        print(f"[mqtt] suscrito a {TOPIC_SENSORS} y {TOPIC_STATE}")
     else:
         print(f"[mqtt] conexión rechazada: {reason_code}")
 
@@ -85,7 +185,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
     print(f"[mqtt] desconectado ({reason_code}); paho reintentará solo")
     with _state_lock:
         latest["connected"] = False
-    _broadcast(dict(latest))
+    _broadcast({"event": "sensors", "data": dict(latest)})
 
 
 def on_message(client, userdata, msg):
@@ -94,16 +194,26 @@ def on_message(client, userdata, msg):
     except (ValueError, UnicodeDecodeError):
         print(f"[mqtt] payload no-JSON en {msg.topic}: {msg.payload!r}")
         return
+
+    if msg.topic == TOPIC_STATE:
+        with _state_lock:
+            state.clear()
+            state.update(data)
+            snapshot = dict(state)
+        _broadcast({"event": "state", "data": snapshot})
+        return
+
+    # TOPIC_SENSORS (lecturas).
     data["connected"] = True
     with _state_lock:
         latest.clear()
         latest.update(data)
         snapshot = dict(latest)
-    _broadcast(snapshot)
+    _store_reading(time.time(), data)
+    _broadcast({"event": "sensors", "data": snapshot})
 
 
 def on_log(client, userdata, level, buf):
-    # logs útiles de paho para diagnóstico
     print(f"[mqtt][log] {buf}")
 
 
@@ -121,16 +231,13 @@ def build_mqtt_client() -> mqtt.Client:
     client.on_disconnect = on_disconnect
     client.on_message = on_message
     client.on_log = on_log
-    # Configurar backoff de reintentos de reconexión
     try:
         client.reconnect_delay_set(1, 120)
     except Exception:
-        # versiones antiguas de paho aceptan (min_delay, max_delay)
         try:
             client.reconnect_delay_set(min_delay=1, max_delay=120)
         except Exception:
             pass
-    # Imprime el client-id y usa un bucle de conexión con backoff
     print(f"[mqtt] usando client_id={MQTT_CLIENT_ID}, keepalive={MQTT_KEEPALIVE}")
     backoff = 1
     while True:
@@ -141,7 +248,7 @@ def build_mqtt_client() -> mqtt.Client:
             print(f"[mqtt] connect exception: {e}; reintentando en {backoff}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 300)
-    client.loop_start()  # hilo de red en segundo plano
+    client.loop_start()
     return client
 
 
@@ -163,17 +270,35 @@ def api_data():
         return jsonify(dict(latest))
 
 
+@app.route("/api/state")
+def api_state():
+    """Último catálogo/estado del ESP (canciones, volumen, umbral, neo, ...)."""
+    with _state_lock:
+        return jsonify(dict(state))
+
+
+@app.route("/api/history")
+def api_history():
+    """Histórico de sensores para las gráficas. Query: ?range=5m|30m|1h|6h|24h|all"""
+    range_key = request.args.get("range", "1h")
+    if range_key not in RANGES:
+        range_key = "1h"
+    return jsonify(_query_history(range_key))
+
+
 @app.route("/api/stream")
 def api_stream():
-    """Stream SSE: empuja cada nueva lectura a los navegadores conectados."""
+    """Stream SSE: empuja lecturas ('sensors') y estado ('state') al navegador."""
 
     def gen():
-        q: queue.Queue = queue.Queue(maxsize=10)
+        q: queue.Queue = queue.Queue(maxsize=50)
         with _state_lock:
             subscribers.add(q)
-            current = json.dumps(dict(latest))
+            init_sensors = json.dumps({"event": "sensors", "data": dict(latest)})
+            init_state = json.dumps({"event": "state", "data": dict(state)})
         try:
-            yield f"data: {current}\n\n"  # estado inicial inmediato
+            yield f"data: {init_sensors}\n\n"
+            yield f"data: {init_state}\n\n"
             while True:
                 msg = q.get()
                 yield f"data: {msg}\n\n"
@@ -184,21 +309,70 @@ def api_stream():
     return Response(gen(), mimetype="text/event-stream")
 
 
+# ----- Endpoints de comandos (publican en MQTT) ------------------------------
+def _publish(topic: str, payload: str) -> None:
+    mqtt_client.publish(topic, payload, qos=1)
+    print(f"[mqtt] pub {topic} -> {payload}")
+
+
 @app.route("/api/pump", methods=["POST"])
 def api_pump():
-    """Activa ('1') o detiene ('0') la bomba publicando en TOPIC_CMD_PUMP."""
+    """Regar ahora ('1') o detener el ciclo ('0'), igual que el botón del ESP."""
     on = bool((request.get_json(silent=True) or {}).get("on", True))
-    payload = "1" if on else "0"
-    mqtt_client.publish(TOPIC_CMD_PUMP, payload, qos=1)
-    print(f"[mqtt] pub {TOPIC_CMD_PUMP} -> {payload}")
+    _publish(TOPIC_CMD_PUMP, "1" if on else "0")
     return jsonify({"ok": True, "pump": on})
 
 
 @app.route("/api/play", methods=["POST"])
 def api_play():
-    """Dispara la melodía de riego publicando '1' en TOPIC_CMD_PLAY."""
-    mqtt_client.publish(TOPIC_CMD_PLAY, "1", qos=1)
-    print(f"[mqtt] pub {TOPIC_CMD_PLAY} -> 1")
+    """Reproduce la canción con el índice indicado en la SD del ESP."""
+    idx = int((request.get_json(silent=True) or {}).get("index", 0))
+    _publish(TOPIC_CMD_PLAY, str(idx))
+    return jsonify({"ok": True, "index": idx})
+
+
+@app.route("/api/stop", methods=["POST"])
+def api_stop():
+    """Detiene la reproducción de audio en el ESP."""
+    _publish(TOPIC_CMD_STOP, "1")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/volume", methods=["POST"])
+def api_volume():
+    """Fija el nivel de volumen (0..volumeMax) del ESP."""
+    level = int((request.get_json(silent=True) or {}).get("level", 0))
+    _publish(TOPIC_CMD_VOLUME, str(level))
+    return jsonify({"ok": True, "level": level})
+
+
+@app.route("/api/wsong", methods=["POST"])
+def api_wsong():
+    """Establece la canción de riego (índice de la SD)."""
+    idx = int((request.get_json(silent=True) or {}).get("index", 0))
+    _publish(TOPIC_CMD_WSONG, str(idx))
+    return jsonify({"ok": True, "index": idx})
+
+
+@app.route("/api/threshold", methods=["POST"])
+def api_threshold():
+    """Cambia el umbral de humedad que dispara el riego automático."""
+    value = float((request.get_json(silent=True) or {}).get("value", 0))
+    _publish(TOPIC_CMD_THRESHOLD, f"{value:.1f}")
+    return jsonify({"ok": True, "value": value})
+
+
+@app.route("/api/neo", methods=["POST"])
+def api_neo():
+    """Control de los NeoPixel: brillo (0..255), patrón y color (#RRGGBB)."""
+    body = request.get_json(silent=True) or {}
+    if "brightness" in body:
+        b = max(0, min(255, int(body["brightness"])))
+        _publish(TOPIC_CMD_NEO_BRIGHT, str(b))
+    if "pattern" in body:
+        _publish(TOPIC_CMD_NEO_PATTERN, str(body["pattern"]))
+    if "color" in body:
+        _publish(TOPIC_CMD_NEO_COLOR, str(body["color"]).lstrip("#"))
     return jsonify({"ok": True})
 
 
