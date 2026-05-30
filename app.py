@@ -51,8 +51,8 @@ TOPIC_CMD_PUMP = os.getenv("TOPIC_CMD_PUMP", "matera/cmd/pump")
 TOPIC_CMD_PLAY = os.getenv("TOPIC_CMD_PLAY", "matera/cmd/play")
 TOPIC_CMD_STOP = os.getenv("TOPIC_CMD_STOP", "matera/cmd/stop")
 TOPIC_CMD_VOLUME = os.getenv("TOPIC_CMD_VOLUME", "matera/cmd/volume")
-TOPIC_CMD_WSONG = os.getenv("TOPIC_CMD_WSONG", "matera/cmd/wsong")
 TOPIC_CMD_THRESHOLD = os.getenv("TOPIC_CMD_THRESHOLD", "matera/cmd/threshold")
+TOPIC_CMD_IRR_INTERVAL = os.getenv("TOPIC_CMD_IRR_INTERVAL", "matera/cmd/irr_interval")
 TOPIC_CMD_NEO_BRIGHT = os.getenv("TOPIC_CMD_NEO_BRIGHT", "matera/cmd/neo/bright")
 TOPIC_CMD_NEO_PATTERN = os.getenv("TOPIC_CMD_NEO_PATTERN", "matera/cmd/neo/pattern")
 TOPIC_CMD_NEO_COLOR = os.getenv("TOPIC_CMD_NEO_COLOR", "matera/cmd/neo/color")
@@ -82,7 +82,14 @@ _db.execute(
     " ts REAL PRIMARY KEY, soil REAL, temp REAL, hum REAL, lux REAL, ppm REAL)"
 )
 _db.execute("CREATE INDEX IF NOT EXISTS idx_ts ON readings(ts)")
+_db.execute(
+    "CREATE TABLE IF NOT EXISTS irrigation_log (id INTEGER PRIMARY KEY, ts REAL NOT NULL)"
+)
+_db.execute("CREATE INDEX IF NOT EXISTS idx_irr_ts ON irrigation_log(ts)")
 _db.commit()
+
+# Último estado de irrigación conocido para detectar transiciones ON→OFF.
+_last_irrigating: bool = False
 
 
 def _store_reading(ts: float, data: dict) -> None:
@@ -98,6 +105,16 @@ def _store_reading(ts: float, data: dict) -> None:
             _db.commit()
         except sqlite3.Error as e:
             print(f"[db] error guardando lectura: {e}")
+
+
+def _log_irrigation(ts: float) -> None:
+    """Registra un evento de inicio de riego en irrigation_log."""
+    with _db_lock:
+        try:
+            _db.execute("INSERT INTO irrigation_log (ts) VALUES (?)", (ts,))
+            _db.commit()
+        except sqlite3.Error as e:
+            print(f"[db] error guardando evento de riego: {e}")
 
 
 def _num(v):
@@ -190,6 +207,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
+    global _last_irrigating
     try:
         data = json.loads(msg.payload.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
@@ -206,6 +224,14 @@ def on_message(client, userdata, msg):
 
     # TOPIC_SENSORS (lecturas).
     data["connected"] = True
+
+    # Detectar inicio de ciclo de riego (transición False → True).
+    irrigating_now = bool(data.get("irrigating", False))
+    if irrigating_now and not _last_irrigating:
+        _log_irrigation(time.time())
+        print("[irrigation] evento registrado en BD")
+    _last_irrigating = irrigating_now
+
     with _state_lock:
         latest.clear()
         latest.update(data)
@@ -287,6 +313,24 @@ def api_history():
     return jsonify(_query_history(range_key))
 
 
+@app.route("/api/irrigation_log")
+def api_irrigation_log():
+    """Eventos de inicio de riego en el rango pedido. Devuelve lista de ts en ms."""
+    range_key = request.args.get("range", "24h")
+    span = RANGES.get(range_key, RANGES["24h"])
+    params: tuple = ()
+    where = ""
+    if span is not None:
+        where = "WHERE ts >= ?"
+        params = (time.time() - span,)
+    with _db_lock:
+        cur = _db.execute(
+            f"SELECT ts FROM irrigation_log {where} ORDER BY ts ASC", params
+        )
+        rows = cur.fetchall()
+    return jsonify({"events": [int(r[0] * 1000) for r in rows]})
+
+
 @app.route("/api/stream")
 def api_stream():
     """Stream SSE: empuja lecturas ('sensors') y estado ('state') al navegador."""
@@ -347,19 +391,19 @@ def api_volume():
     return jsonify({"ok": True, "level": level})
 
 
-@app.route("/api/wsong", methods=["POST"])
-def api_wsong():
-    """Establece la canción de riego (índice de la SD)."""
-    idx = int((request.get_json(silent=True) or {}).get("index", 0))
-    _publish(TOPIC_CMD_WSONG, str(idx))
-    return jsonify({"ok": True, "index": idx})
-
-
 @app.route("/api/threshold", methods=["POST"])
 def api_threshold():
     """Cambia el umbral de humedad que dispara el riego automático."""
     value = float((request.get_json(silent=True) or {}).get("value", 0))
     _publish(TOPIC_CMD_THRESHOLD, f"{value:.1f}")
+    return jsonify({"ok": True, "value": value})
+
+
+@app.route("/api/irr_interval", methods=["POST"])
+def api_irr_interval():
+    """Cambia el intervalo de tiempo entre revisiones de riego (en horas)."""
+    value = float((request.get_json(silent=True) or {}).get("value", 24))
+    _publish(TOPIC_CMD_IRR_INTERVAL, f"{value:.1f}")
     return jsonify({"ok": True, "value": value})
 
 

@@ -103,21 +103,34 @@
   </h2>
   <div class="charts" id="charts"></div>
 
+  <!-- ===== Línea de tiempo de riego ===== -->
+  <h2>Historial de riego</h2>
+  <div class="chart-card" style="margin-bottom:14px">
+    <h3>Eventos de riego <span class="now" id="irr_count" style="color:var(--accent)"></span></h3>
+    <div class="chart-box" style="height:90px"><canvas id="ch_irrigation"></canvas></div>
+  </div>
+
   <!-- ===== Riego ===== -->
   <h2>Riego</h2>
   <div class="panel">
     <div class="row">
       <label class="cap">Umbral de humedad</label>
-      <input type="number" id="thr" min="0" max="100" step="1">
+      <input type="number" id="thrLow" min="0" max="100" step="1">
       <span class="unit">%</span>
-      <button onclick="setThreshold()">Aplicar</button>
-      <span class="hint">Por debajo de este valor se riega automáticamente.</span>
+      <button onclick="setThresholdLow()">Aplicar</button>
+      <span class="hint">Solo riega si la humedad está por debajo al vencer el intervalo.</span>
+    </div>
+    <div class="row">
+      <label class="cap">Intervalo de riego</label>
+      <input type="number" id="irrInterval" min="0.1" max="720" step="0.5">
+      <span class="unit">h</span>
+      <button onclick="setIrrInterval()">Aplicar</button>
+      <span class="hint">Tiempo entre revisiones automáticas del sensor.</span>
     </div>
     <div class="row">
       <label class="cap">Riego manual</label>
       <button id="btnWater" onclick="waterNow()">💧 Regar ahora</button>
-      <button class="stop" onclick="pump(false)">Detener</button>
-      <span class="hint" id="irrhint">Pulso de bomba de 3–4 s (mismas políticas que el ESP).</span>
+      <span class="hint" id="irrhint">Pulso de 5 s inmediato, sin afectar el temporizador.</span>
     </div>
   </div>
 
@@ -129,7 +142,6 @@
       <select id="songsel" style="min-width:220px"></select>
       <button onclick="playSong()">▶ Reproducir</button>
       <button class="stop" onclick="stopSong()">⏹ Parar</button>
-      <button class="alt" onclick="setWatering()">Usar como canción de riego</button>
     </div>
     <div class="row">
       <label class="cap">Volumen</label>
@@ -137,7 +149,6 @@
              oninput="volval.textContent=this.value" onchange="setVolume(this.value)">
       <span id="volval">--</span>
     </div>
-    <div class="row hint" id="wsonglbl">Canción de riego: (ninguna)</div>
   </div>
 
   <!-- ===== NeoPixel ===== -->
@@ -180,12 +191,12 @@
       });
     } catch (e) { flash("Error de red"); }
   }
-  function pump(on)        { post("/api/pump", { on }); flash(on ? "Riego iniciado" : "Bomba detenida"); }
-  function waterNow()      { $("btnWater").disabled = true; pump(true); }
-  function setThreshold()  { const v = $("thr").value; post("/api/threshold", { value: Number(v) }); flash("Umbral = " + v + "%"); }
+  function pump(on)           { post("/api/pump", { on }); flash(on ? "Riego iniciado" : "Bomba detenida"); }
+  function waterNow()         { $("btnWater").disabled = true; pump(true); }
+  function setThresholdLow()  { const v = $("thrLow").value;     post("/api/threshold",    { value: Number(v) }); flash("Umbral = " + v + "%"); }
+  function setIrrInterval()   { const v = $("irrInterval").value; post("/api/irr_interval", { value: Number(v) }); flash("Intervalo = " + v + " h"); }
   function playSong()      { const i = $("songsel").value; if (i === "") return flash("No hay canciones"); post("/api/play", { index: Number(i) }); flash("Reproduciendo"); }
   function stopSong()      { post("/api/stop"); flash("Audio detenido"); }
-  function setWatering()   { const s = $("songsel"); if (s.value === "") return flash("No hay canciones"); post("/api/wsong", { index: Number(s.value) }); flash("Canción de riego fijada"); }
   function setVolume(v)    { post("/api/volume", { level: Number(v) }); }
   function setNeoBright(v) { post("/api/neo", { brightness: Number(v) }); }
   function setNeoPattern(p){ post("/api/neo", { pattern: p }); toggleColor(p); }
@@ -242,6 +253,61 @@
 
   function currentRange() { return $("range").value; }
 
+  // ---------- Gráfica de eventos de riego ----------
+  let irrChart = null;
+
+  function buildIrrigationChart() {
+    const fmtTime = ts => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    irrChart = new Chart($("ch_irrigation"), {
+      type: "scatter",
+      data: { datasets: [{
+        data: [],
+        backgroundColor: "#2ad1a9",
+        pointRadius: 8,
+        pointHoverRadius: 10,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: () => "",
+              label: c => "Riego: " + new Date(c.parsed.x).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: "linear",
+            ticks: {
+              color: "#8b98a5",
+              maxTicksLimit: 8,
+              maxRotation: 0,
+              callback: fmtTime,
+            },
+            grid: { color: "#2b3640" },
+          },
+          y: { display: false, min: 0, max: 2 },
+        },
+      },
+    });
+  }
+
+  function renderIrrigationChart(events) {
+    if (!irrChart) return;
+    // Ajustar el rango del eje X al rango de tiempo seleccionado.
+    const span = RANGE_MS[currentRange()];
+    const now = Date.now();
+    const xMin = span === Infinity ? (events.length ? events[0] : now - 864e5) : now - span;
+    irrChart.options.scales.x.min = xMin;
+    irrChart.options.scales.x.max = now;
+    irrChart.data.datasets[0].data = events.map(t => ({ x: t, y: 1 }));
+    irrChart.update("none");
+    const count = events.length;
+    $("irr_count").textContent = count === 0 ? "sin eventos en el rango" : count + (count === 1 ? " evento" : " eventos");
+  }
+
   function renderChart(m) {
     const span = RANGE_MS[currentRange()];
     const now = Date.now();
@@ -256,13 +322,18 @@
   // Carga el histórico del servidor para el rango actual y reconstruye las series.
   async function loadHistory() {
     try {
-      const r = await fetch("/api/history?range=" + currentRange(), { cache: "no-store" });
-      const d = await r.json();
+      const [rh, ri] = await Promise.all([
+        fetch("/api/history?range=" + currentRange(), { cache: "no-store" }),
+        fetch("/api/irrigation_log?range=" + currentRange(), { cache: "no-store" }),
+      ]);
+      const d = await rh.json();
       METRICS.forEach(m => {
         series[m.key] = (d.t || []).map((t, i) => ({ t, v: d[m.key][i] }))
                                    .filter(p => p.v !== null && p.v !== undefined);
       });
       renderAllCharts();
+      const di = await ri.json();
+      renderIrrigationChart(di.events || []);
     } catch (e) { /* sin histórico aún */ }
   }
 
@@ -301,8 +372,8 @@
     // El botón "Regar ahora" se bloquea mientras dura el ciclo de riego.
     $("btnWater").disabled = irr;
     $("irrhint").textContent = irr
-      ? "Ciclo de riego en curso…"
-      : "Pulso de bomba de 3–4 s (mismas políticas que el ESP).";
+      ? "Regando… (5 s)"
+      : "Pulso de 5 s inmediato, sin afectar el temporizador.";
 
     $("ts").textContent = new Date().toLocaleTimeString();
     pushLive(d);
@@ -313,7 +384,7 @@
     // Selector de canciones.
     const sel = $("songsel");
     const songs = s.songs || [];
-    if (sel.dataset.count != songs.length) {     // reconstruir sólo si cambió
+    if (sel.dataset.count != songs.length) {
       sel.innerHTML = "";
       songs.forEach((name, i) => {
         const o = document.createElement("option");
@@ -321,19 +392,15 @@
       });
       sel.dataset.count = songs.length;
     }
-    if (typeof s.wateringSong === "number" && s.wateringSong >= 0 && songs[s.wateringSong]) {
-      $("wsonglbl").textContent = "Canción de riego: " + songs[s.wateringSong];
-    } else {
-      $("wsonglbl").textContent = "Canción de riego: (ninguna)";
-    }
 
     // Volumen.
     if (!busy($("vol"))) {
       if (typeof s.volumeMax === "number") $("vol").max = s.volumeMax;
       if (typeof s.volume === "number") { $("vol").value = s.volume; $("volval").textContent = s.volume; }
     }
-    // Umbral.
-    if (!busy($("thr")) && typeof s.threshold === "number") $("thr").value = Math.round(s.threshold);
+    // Riego: umbral e intervalo.
+    if (!busy($("thrLow"))     && typeof s.thresholdLow       === "number") $("thrLow").value      = s.thresholdLow;
+    if (!busy($("irrInterval")) && typeof s.irrigationInterval === "number") $("irrInterval").value = s.irrigationInterval;
 
     // NeoPixel.
     if (!busy($("neoBright")) && typeof s.neoBright === "number") {
@@ -366,6 +433,7 @@
   // ---------- Arranque ----------
   $("range").addEventListener("change", loadHistory);
   buildCharts();
+  buildIrrigationChart();
   loadHistory();
   fetch("/api/state").then(r => r.json()).then(renderState).catch(() => {});
 </script>
