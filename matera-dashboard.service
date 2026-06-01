@@ -18,7 +18,7 @@ Wants=network-online.target
 [Service]
 User=pi
 WorkingDirectory=/home/pi/raspi_mqtt_matera
-ExecStart=/home/pi/raspi_mqtt_matera/venv/bin/python app.py
+ExecStart=/home/pi/raspi_mqtt_matera/venv/bin/gunicorn -w 1 --threads 8 -b 0.0.0.0:8000 app:app
 Restart=on-failure
 RestartSec=5
 

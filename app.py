@@ -345,13 +345,26 @@ def api_stream():
             yield f"data: {init_sensors}\n\n"
             yield f"data: {init_state}\n\n"
             while True:
-                msg = q.get()
-                yield f"data: {msg}\n\n"
+                try:
+                    msg = q.get(timeout=30)
+                    yield f"data: {msg}\n\n"
+                except queue.Empty:
+                    # Heartbeat: evita que proxies (Cloudflare, nginx) corten
+                    # la conexión por inactividad (~100 s de timeout por defecto).
+                    yield ": keepalive\n\n"
         finally:
             with _state_lock:
                 subscribers.discard(q)
 
-    return Response(gen(), mimetype="text/event-stream")
+    return Response(
+        gen(),
+        mimetype="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",   # desactiva buffering en Cloudflare/nginx
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ----- Endpoints de comandos (publican en MQTT) ------------------------------

@@ -419,9 +419,14 @@
       $("neoColor").value = ("#" + String(s.neoColor).replace(/^#/, "")).toLowerCase();
   }
 
-  // ---------- Stream SSE ----------
+  // ---------- Stream SSE + polling fallback ----------
+  // Cloudflare y otros proxies pueden bufferizar SSE indefinidamente.
+  // Si no llega ningún evento en 3 s, el polling toma el control automáticamente.
+  let lastSseTs = 0;
+
   const es = new EventSource("/api/stream");
   es.onmessage = (e) => {
+    lastSseTs = Date.now();
     try {
       const m = JSON.parse(e.data);
       if (m.event === "sensors") renderSensors(m.data);
@@ -429,6 +434,18 @@
     } catch (_) {}
   };
   es.onerror = () => { document.body.classList.add("stale"); };
+
+  setInterval(async () => {
+    if (Date.now() - lastSseTs < 3000) return;
+    try {
+      const [rd, rs] = await Promise.all([
+        fetch("/api/data",  { cache: "no-store" }),
+        fetch("/api/state", { cache: "no-store" }),
+      ]);
+      renderSensors(await rd.json());
+      renderState(await rs.json());
+    } catch (_) {}
+  }, 2000);
 
   // ---------- Arranque ----------
   $("range").addEventListener("change", loadHistory);
