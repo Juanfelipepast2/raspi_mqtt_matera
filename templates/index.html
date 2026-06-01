@@ -135,6 +135,16 @@
       <button id="btnWater" onclick="waterNow()">💧 Regar ahora</button>
       <span class="hint" id="irrhint">Pulso de 5 s inmediato, sin afectar el temporizador.</span>
     </div>
+    <div class="row" id="nextIrrRow" style="display:none">
+      <label class="cap">Próximo chequeo</label>
+      <span id="nextIrrDisplay" class="pill irr" style="font-size:.9rem;padding:6px 14px">--</span>
+      <div style="flex:1;min-width:160px">
+        <div style="background:#0d1117;border-radius:6px;height:6px;overflow:hidden;margin-bottom:4px">
+          <div id="nextIrrBar" style="height:100%;background:var(--accent);width:0%;transition:width .8s linear"></div>
+        </div>
+        <span class="hint">Solo riega si la humedad está bajo el umbral al vencer el intervalo.</span>
+      </div>
+    </div>
   </div>
 
   <!-- ===== Audio / canciones ===== -->
@@ -366,6 +376,31 @@
     renderAllCharts();
   }
 
+  // ---------- Countdown "próximo chequeo de riego" ----------
+  let _nextIrrAt = null;       // epoch ms del próximo chequeo
+  let _irrIntervalSecs = null; // duración total del intervalo (para la barra)
+
+  function fmtDuration(secs) {
+    if (secs <= 0) return "verificando...";
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `en ${h}h ${String(m).padStart(2,"0")}m`;
+    if (m > 0) return `en ${m}m ${String(s).padStart(2,"0")}s`;
+    return `en ${s}s`;
+  }
+
+  function tickNextIrr() {
+    if (_nextIrrAt === null) return;
+    const remaining = Math.max(0, Math.round((_nextIrrAt - Date.now()) / 1000));
+    $("nextIrrDisplay").textContent = fmtDuration(remaining);
+    if (_irrIntervalSecs && _irrIntervalSecs > 0) {
+      const pct = Math.min(100, Math.round((1 - remaining / _irrIntervalSecs) * 100));
+      $("nextIrrBar").style.width = pct + "%";
+    }
+  }
+  setInterval(tickNextIrr, 1000);
+
   // ---------- Render de estado en vivo ----------
   function renderSensors(d) {
     const connected = d && d.connected;
@@ -390,6 +425,12 @@
     $("irrhint").textContent = irr
       ? "Regando… (5 s)"
       : "Pulso de 5 s inmediato, sin afectar el temporizador.";
+
+    if (typeof d.nextIrrSecs === "number") {
+      $("nextIrrRow").style.display = "";
+      _nextIrrAt = Date.now() + d.nextIrrSecs * 1000;
+      tickNextIrr();
+    }
 
     $("ts").textContent = new Date().toLocaleTimeString();
     pushLive(d);
@@ -416,7 +457,10 @@
     }
     // Riego: umbral e intervalo.
     if (!fresh($("thrLow"))     && typeof s.thresholdLow       === "number") $("thrLow").value      = s.thresholdLow;
-    if (!fresh($("irrInterval")) && typeof s.irrigationInterval === "number") $("irrInterval").value = s.irrigationInterval;
+    if (!fresh($("irrInterval")) && typeof s.irrigationInterval === "number") {
+      $("irrInterval").value = s.irrigationInterval;
+      _irrIntervalSecs = s.irrigationInterval * 3600;
+    }
 
     // NeoPixel.
     if (!fresh($("neoBright")) && typeof s.neoBright === "number") {
