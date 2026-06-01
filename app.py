@@ -16,6 +16,8 @@
 #
 # Conexión a HiveMQ Cloud por TLS (8883) con el almacén de CAs del sistema.
 # =============================================================================
+import base64
+import functools
 import json
 import os
 import queue
@@ -59,6 +61,8 @@ TOPIC_CMD_NEO_COLOR = os.getenv("TOPIC_CMD_NEO_COLOR", "matera/cmd/neo/color")
 
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
+MATERA_ID = os.getenv("MATERA_ID", "")
+WEB_PASS = os.getenv("WEB_PASS", "")
 
 # Ruta de la base de datos del histórico (junto al app.py por defecto).
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "history.db"))
@@ -285,6 +289,42 @@ mqtt_client = build_mqtt_client()
 app = Flask(__name__)
 
 
+_AUTH_REALM = 'Basic realm="Matera - ingresa el ID"'
+
+
+def _check_auth() -> bool:
+    """Devuelve True si la petición incluye credenciales válidas (o si auth está deshabilitada)."""
+    if not MATERA_ID or not WEB_PASS:
+        return True
+    auth = request.headers.get("Authorization", "")
+    try:
+        scheme, cred = auth.split(" ", 1)
+        uid, pwd = base64.b64decode(cred).decode().split(":", 1)
+        return scheme.lower() == "basic" and uid == MATERA_ID and pwd == WEB_PASS
+    except Exception:
+        return False
+
+
+def require_auth(f):
+    """Decorador: exige Basic Auth solo en los endpoints de comandos."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if not _check_auth():
+            return Response("No autorizado", 401, {"WWW-Authenticate": _AUTH_REALM})
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/api/login")
+def api_login():
+    """GET que dispara el popup nativo del navegador y redirige al dashboard tras autenticar."""
+    if not _check_auth():
+        return Response("Ingresá el ID y contraseña de la matera.", 401,
+                        {"WWW-Authenticate": _AUTH_REALM})
+    from flask import redirect
+    return redirect("/")
+
+
 @app.route("/")
 def index():
     return render_template("index.html", refresh_ms=2000)
@@ -374,6 +414,7 @@ def _publish(topic: str, payload: str) -> None:
 
 
 @app.route("/api/pump", methods=["POST"])
+@require_auth
 def api_pump():
     """Regar ahora ('1') o detener el ciclo ('0'), igual que el botón del ESP."""
     on = bool((request.get_json(silent=True) or {}).get("on", True))
@@ -382,6 +423,7 @@ def api_pump():
 
 
 @app.route("/api/play", methods=["POST"])
+@require_auth
 def api_play():
     """Reproduce la canción con el índice indicado en la SD del ESP."""
     idx = int((request.get_json(silent=True) or {}).get("index", 0))
@@ -390,6 +432,7 @@ def api_play():
 
 
 @app.route("/api/stop", methods=["POST"])
+@require_auth
 def api_stop():
     """Detiene la reproducción de audio en el ESP."""
     _publish(TOPIC_CMD_STOP, "1")
@@ -397,6 +440,7 @@ def api_stop():
 
 
 @app.route("/api/volume", methods=["POST"])
+@require_auth
 def api_volume():
     """Fija el nivel de volumen (0..volumeMax) del ESP."""
     level = int((request.get_json(silent=True) or {}).get("level", 0))
@@ -405,6 +449,7 @@ def api_volume():
 
 
 @app.route("/api/threshold", methods=["POST"])
+@require_auth
 def api_threshold():
     """Cambia el umbral de humedad que dispara el riego automático."""
     value = float((request.get_json(silent=True) or {}).get("value", 0))
@@ -413,6 +458,7 @@ def api_threshold():
 
 
 @app.route("/api/irr_interval", methods=["POST"])
+@require_auth
 def api_irr_interval():
     """Cambia el intervalo de tiempo entre revisiones de riego (en horas)."""
     value = float((request.get_json(silent=True) or {}).get("value", 24))
@@ -421,6 +467,7 @@ def api_irr_interval():
 
 
 @app.route("/api/neo", methods=["POST"])
+@require_auth
 def api_neo():
     """Control de los NeoPixel: brillo (0..255), patrón y color (#RRGGBB)."""
     body = request.get_json(silent=True) or {}

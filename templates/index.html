@@ -70,7 +70,10 @@
 <body>
   <header>
     <h1>🪴 Matera inteligente</h1>
-    <div class="status"><span id="dot" class="dot"></span><span id="conn">sin datos</span></div>
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div class="status"><span id="dot" class="dot"></span><span id="conn">sin datos</span></div>
+      <a id="authBtn" href="/api/login" style="font-size:.85rem;color:var(--muted);text-decoration:none">🔒 Autenticar</a>
+    </div>
   </header>
 
   <!-- ===== Valores en tiempo real ===== -->
@@ -184,11 +187,17 @@
   // ---------- Comandos (POST -> publica MQTT) ----------
   async function post(url, body) {
     try {
-      await fetch(url, {
+      const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : null,
       });
+      if (r.status === 401) {
+        // Redirigir a /api/login dispara el popup nativo de Basic Auth.
+        // Al autenticar, el navegador cachea las credenciales y redirige a /.
+        window.location.href = "/api/login";
+        return;
+      }
     } catch (e) { flash("Error de red"); }
   }
   function pump(on)           { post("/api/pump", { on }); flash(on ? "Riego iniciado" : "Bomba detenida"); }
