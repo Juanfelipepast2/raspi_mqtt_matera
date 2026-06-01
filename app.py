@@ -445,6 +445,8 @@ def api_volume():
     """Fija el nivel de volumen (0..volumeMax) del ESP."""
     level = int((request.get_json(silent=True) or {}).get("level", 0))
     _publish(TOPIC_CMD_VOLUME, str(level))
+    with _state_lock:
+        state["volume"] = level
     return jsonify({"ok": True, "level": level})
 
 
@@ -454,6 +456,8 @@ def api_threshold():
     """Cambia el umbral de humedad que dispara el riego automático."""
     value = float((request.get_json(silent=True) or {}).get("value", 0))
     _publish(TOPIC_CMD_THRESHOLD, f"{value:.1f}")
+    with _state_lock:
+        state["thresholdLow"] = value
     return jsonify({"ok": True, "value": value})
 
 
@@ -463,6 +467,8 @@ def api_irr_interval():
     """Cambia el intervalo de tiempo entre revisiones de riego (en horas)."""
     value = float((request.get_json(silent=True) or {}).get("value", 24))
     _publish(TOPIC_CMD_IRR_INTERVAL, f"{value:.1f}")
+    with _state_lock:
+        state["irrigationInterval"] = value
     return jsonify({"ok": True, "value": value})
 
 
@@ -474,10 +480,17 @@ def api_neo():
     if "brightness" in body:
         b = max(0, min(255, int(body["brightness"])))
         _publish(TOPIC_CMD_NEO_BRIGHT, str(b))
+        with _state_lock:
+            state["neoBright"] = b
     if "pattern" in body:
         _publish(TOPIC_CMD_NEO_PATTERN, str(body["pattern"]))
+        with _state_lock:
+            state["neoPattern"] = str(body["pattern"])
     if "color" in body:
-        _publish(TOPIC_CMD_NEO_COLOR, str(body["color"]).lstrip("#"))
+        color_hex = str(body["color"]).lstrip("#")
+        _publish(TOPIC_CMD_NEO_COLOR, color_hex)
+        with _state_lock:
+            state["neoColor"] = color_hex
     return jsonify({"ok": True})
 
 
