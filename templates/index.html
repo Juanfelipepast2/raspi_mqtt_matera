@@ -70,7 +70,10 @@
 <body>
   <header>
     <h1>🪴 Matera inteligente</h1>
-    <div class="status"><span id="dot" class="dot"></span><span id="conn">sin datos</span></div>
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div class="status"><span id="dot" class="dot"></span><span id="conn">sin datos</span></div>
+      <a id="authBtn" href="/api/login" style="font-size:.85rem;color:var(--muted);text-decoration:none">🔒 Autenticar</a>
+    </div>
   </header>
 
   <!-- ===== Valores en tiempo real ===== -->
@@ -146,7 +149,7 @@
     <div class="row">
       <label class="cap">Volumen</label>
       <input type="range" id="vol" min="0" max="4" step="1"
-             oninput="volval.textContent=this.value" onchange="setVolume(this.value)">
+             oninput="markDirty('vol'); volval.textContent=this.value" onchange="setVolume(this.value)">
       <span id="volval">--</span>
     </div>
   </div>
@@ -157,7 +160,7 @@
     <div class="row">
       <label class="cap">Brillo</label>
       <input type="range" id="neoBright" min="0" max="255" step="1"
-             oninput="neoBrightVal.textContent=this.value" onchange="setNeoBright(this.value)">
+             oninput="markDirty('neoBright'); neoBrightVal.textContent=this.value" onchange="setNeoBright(this.value)">
       <span id="neoBrightVal">--</span>
     </div>
     <div class="row">
@@ -184,29 +187,42 @@
   // ---------- Comandos (POST -> publica MQTT) ----------
   async function post(url, body) {
     try {
-      await fetch(url, {
+      const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : null,
       });
+      if (r.status === 401) {
+        // Redirigir a /api/login dispara el popup nativo de Basic Auth.
+        // Al autenticar, el navegador cachea las credenciales y redirige a /.
+        window.location.href = "/api/login";
+        return;
+      }
     } catch (e) { flash("Error de red"); }
   }
   function pump(on)           { post("/api/pump", { on }); flash(on ? "Riego iniciado" : "Bomba detenida"); }
   function waterNow()         { $("btnWater").disabled = true; pump(true); }
-  function setThresholdLow()  { const v = $("thrLow").value;     post("/api/threshold",    { value: Number(v) }); flash("Umbral = " + v + "%"); }
-  function setIrrInterval()   { const v = $("irrInterval").value; post("/api/irr_interval", { value: Number(v) }); flash("Intervalo = " + v + " h"); }
+  function setThresholdLow()  { const v = $("thrLow").value;     markDirty("thrLow");      post("/api/threshold",    { value: Number(v) }); flash("Umbral = " + v + "%"); }
+  function setIrrInterval()   { const v = $("irrInterval").value; markDirty("irrInterval"); post("/api/irr_interval", { value: Number(v) }); flash("Intervalo = " + v + " h"); }
   function playSong()      { const i = $("songsel").value; if (i === "") return flash("No hay canciones"); post("/api/play", { index: Number(i) }); flash("Reproduciendo"); }
   function stopSong()      { post("/api/stop"); flash("Audio detenido"); }
-  function setVolume(v)    { post("/api/volume", { level: Number(v) }); }
-  function setNeoBright(v) { post("/api/neo", { brightness: Number(v) }); }
-  function setNeoPattern(p){ post("/api/neo", { pattern: p }); toggleColor(p); }
-  function setNeoColor(c)  { post("/api/neo", { color: c }); }
+  function setVolume(v)    { markDirty("vol");       post("/api/volume", { level: Number(v) }); }
+  function setNeoBright(v) { markDirty("neoBright"); post("/api/neo", { brightness: Number(v) }); }
+  function setNeoPattern(p){ markDirty("neoPattern"); post("/api/neo", { pattern: p }); toggleColor(p); }
+  function setNeoColor(c)  { markDirty("neoColor");  post("/api/neo", { color: c }); }
 
   const COLOR_PATTERNS = ["solid", "breathe", "comet"];
   function toggleColor(p) { $("colorWrap").style.display = COLOR_PATTERNS.includes(p) ? "" : "none"; }
 
   // No pisar un control mientras el usuario lo está manipulando.
   const busy = (el) => document.activeElement === el;
+
+  // Tampoco sobreescribir controles que el usuario modificó recientemente
+  // (el ESP32 tarda unos segundos en procesar el cmd y publicar state actualizado).
+  const _dirty = {};
+  const DIRTY_MS = 4000;
+  function markDirty(id) { _dirty[id] = Date.now() + DIRTY_MS; }
+  function fresh(el) { return busy(el) || (_dirty[el.id] || 0) > Date.now(); }
 
   // ---------- Gráficas ----------
   const METRICS = [
@@ -394,16 +410,16 @@
     }
 
     // Volumen.
-    if (!busy($("vol"))) {
+    if (!fresh($("vol"))) {
       if (typeof s.volumeMax === "number") $("vol").max = s.volumeMax;
       if (typeof s.volume === "number") { $("vol").value = s.volume; $("volval").textContent = s.volume; }
     }
     // Riego: umbral e intervalo.
-    if (!busy($("thrLow"))     && typeof s.thresholdLow       === "number") $("thrLow").value      = s.thresholdLow;
-    if (!busy($("irrInterval")) && typeof s.irrigationInterval === "number") $("irrInterval").value = s.irrigationInterval;
+    if (!fresh($("thrLow"))     && typeof s.thresholdLow       === "number") $("thrLow").value      = s.thresholdLow;
+    if (!fresh($("irrInterval")) && typeof s.irrigationInterval === "number") $("irrInterval").value = s.irrigationInterval;
 
     // NeoPixel.
-    if (!busy($("neoBright")) && typeof s.neoBright === "number") {
+    if (!fresh($("neoBright")) && typeof s.neoBright === "number") {
       $("neoBright").value = s.neoBright; $("neoBrightVal").textContent = s.neoBright;
     }
     const psel = $("neoPattern");
@@ -413,9 +429,9 @@
       patterns.forEach(p => { const o = document.createElement("option"); o.value = p; o.textContent = p; psel.appendChild(o); });
       psel.dataset.count = patterns.length;
     }
-    if (s.neoPattern && !busy(psel)) { psel.value = s.neoPattern; toggleColor(s.neoPattern); }
+    if (s.neoPattern && !fresh(psel)) { psel.value = s.neoPattern; toggleColor(s.neoPattern); }
     // <input type=color> exige hex en minúsculas con '#'.
-    if (s.neoColor && !busy($("neoColor")))
+    if (s.neoColor && !fresh($("neoColor")))
       $("neoColor").value = ("#" + String(s.neoColor).replace(/^#/, "")).toLowerCase();
   }
 
